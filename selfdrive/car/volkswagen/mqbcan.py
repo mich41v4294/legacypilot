@@ -117,3 +117,15 @@ def create_acc_hud_control(packer, bus, acc_hud_status, set_speed, lead_distance
   }
 
   return packer.make_can_msg("ACC_02", bus, values)
+
+def pla_control(packer, bus, angle, pla_enabled):
+  values = {
+    "Status_1": 0,
+    "steer_deg": abs(angle),
+    "steer_direction": 1 if angle < 0 else 0,
+    "Status_2": pla_enabled,
+    "Status_3": pla_enabled,
+    "Status_4": not pla_enabled,
+  }
+  return packer.make_can_msg("PLA_01", bus, values)
+
