@@ -17,7 +17,7 @@ from .base import BaseHandle
 from .constants import FW_PATH, McuType
 from .dfu import PandaDFU
 from .isotp import isotp_send, isotp_recv
-from .spi import PandaSpiHandle, PandaSpiException, PandaProtocolMismatch
+from .spi import PandaSpiHandle, PandaSpiException
 from .usb import PandaUsbHandle
 
 __version__ = '0.0.10'
@@ -26,6 +26,7 @@ __version__ = '0.0.10'
 LOGLEVEL = os.environ.get('LOGLEVEL', 'INFO').upper()
 logging.basicConfig(level=LOGLEVEL, format='%(message)s')
 
+USBPACKET_MAX_SIZE = 0x40
 CANPACKET_HEAD_SIZE = 0x6
 DLC_TO_LEN = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64]
 LEN_TO_DLC = {length: dlc for (dlc, length) in enumerate(DLC_TO_LEN)}
@@ -202,10 +203,7 @@ class Panda:
   CAN_PACKET_VERSION = 4
   HEALTH_PACKET_VERSION = 14
   CAN_HEALTH_PACKET_VERSION = 5
-  #dp - 2 extra "B" at the end:
-  # "usb_power_mode": a[23],
-  # "torque_interceptor_detected": a[24],
-  HEALTH_STRUCT = struct.Struct("<IIIIIIIIIBBBBBBHBBBHfBBHBHHBB")
+  HEALTH_STRUCT = struct.Struct("<IIIIIIIIIBBBBBBHBBBHfBBHBHH")
   CAN_HEALTH_STRUCT = struct.Struct("<BIBBBBBBBBIIIIIIIHHBBBIIII")
 
   F2_DEVICES = (HW_TYPE_PEDAL, )
@@ -257,7 +255,6 @@ class Panda:
   FLAG_GM_HW_CAM_LONG = 2
 
   FLAG_FORD_LONG_CONTROL = 1
-  FLAG_FORD_CANFD = 2
 
   def __init__(self, serial: Optional[str] = None, claim: bool = True, disable_checks: bool = True):
     self._connect_serial = serial
@@ -329,30 +326,16 @@ class Panda:
       self.set_power_save(0)
 
   @staticmethod
-  def spi_connect(serial, ignore_version=False):
+  def spi_connect(serial):
     # get UID to confirm slave is present and up
     handle = None
     spi_serial = None
     bootstub = None
-    spi_version = None
     try:
       handle = PandaSpiHandle()
-
-      # connect by protcol version
-      try:
-        dat = handle.get_protocol_version()
-        spi_serial = binascii.hexlify(dat[:12]).decode()
-        pid = dat[13]
-        if pid not in (0xcc, 0xee):
-          raise PandaSpiException("invalid bootstub status")
-        bootstub = pid == 0xee
-        spi_version = dat[14]
-      except PandaSpiException:
-        # fallback, we'll raise a protocol mismatch below
-        dat = handle.controlRead(Panda.REQUEST_IN, 0xc3, 0, 0, 12, timeout=100)
-        spi_serial = binascii.hexlify(dat).decode()
-        bootstub = Panda.flasher_present(handle)
-        spi_version = 0
+      dat = handle.controlRead(Panda.REQUEST_IN, 0xc3, 0, 0, 12, timeout=100)
+      spi_serial = binascii.hexlify(dat).decode()
+      bootstub = Panda.flasher_present(handle)
     except PandaSpiException:
       pass
 
@@ -361,12 +344,6 @@ class Panda:
       handle = None
       spi_serial = None
       bootstub = False
-
-    # ensure our protocol version matches the panda
-    if handle is not None and not ignore_version:
-      if spi_version != handle.PROTOCOL_VERSION:
-        err = f"panda protocol mismatch: expected {handle.PROTOCOL_VERSION}, got {spi_version}. reflash panda"
-        raise PandaProtocolMismatch(err)
 
     return handle, spi_serial, bootstub, None
 
@@ -439,7 +416,7 @@ class Panda:
 
   @staticmethod
   def spi_list():
-    _, serial, _, _ = Panda.spi_connect(None, ignore_version=True)
+    _, serial, _, _ = Panda.spi_connect(None)
     if serial is not None:
       return [serial, ]
     return []
@@ -635,8 +612,6 @@ class Panda:
       "fan_stall_count": a[24],
       "sbu1_voltage_mV": a[25],
       "sbu2_voltage_mV": a[26],
-      "usb_power_mode": a[27],
-      "torque_interceptor_detected": a[28],
     }
 
   @ensure_can_health_packet_version
@@ -900,7 +875,7 @@ class Panda:
 
   def serial_write(self, port_number, ln):
     ret = 0
-    if isinstance(ln, str):
+    if type(ln) == str:
       ln = bytes(ln, 'utf-8')
     for i in range(0, len(ln), 0x20):
       ret += self._handle.bulkWrite(2, struct.pack("B", port_number) + ln[i:i + 0x20])
@@ -1024,12 +999,6 @@ class Panda:
   # ****************** Debug *****************
   def set_green_led(self, enabled):
     self._handle.controlWrite(Panda.REQUEST_OUT, 0xf7, int(enabled), 0, b'')
-
-  def set_clock_source_period(self, period):
-    self._handle.controlWrite(Panda.REQUEST_OUT, 0xe6, period, 0, b'')
-
-  def force_relay_drive(self, intercept_relay_drive, ignition_relay_drive):
-    self._handle.controlWrite(Panda.REQUEST_OUT, 0xc5, (int(intercept_relay_drive) | int(ignition_relay_drive) << 1), 0, b'')
 
   # ****************** Logging *****************
   def get_logs(self, last_id=None, get_all=False):
